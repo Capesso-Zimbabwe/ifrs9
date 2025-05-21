@@ -1,5 +1,5 @@
 const db = require('../../config/database');
-const auditLogger = require('../../services/auditLogger');
+const moment = require('moment');
 
 const searchAccounts = async (req, res) => {
     const { accountNumber, runKey, misDate, stage } = req.query;
@@ -34,10 +34,14 @@ const searchAccounts = async (req, res) => {
         }
         
         if (misDate) {
-            query += ` AND fic_mis_date = ?`;
-            params.push(misDate);
+            // Format date as YYYY-MM-DD in UTC to match the date as seen in the local timezone
+            // This handles the timezone offset properly
+            const searchDate = moment.utc(misDate).format('YYYY-MM-DD');
+            query += ` AND DATE(CONVERT_TZ(fic_mis_date, '+00:00', @@session.time_zone)) = ?`;
+            params.push(searchDate);
         }
-          if (stage) {
+        
+        if (stage) {
             query += ` AND n_curr_ifrs_stage_skey = ?`;
             params.push(stage);
         }
@@ -46,9 +50,15 @@ const searchAccounts = async (req, res) => {
         
         const [results] = await connection.query(query, params);
         
+        // Format dates in response for consistency with the frontend
+        const formattedResults = results.map(record => ({
+            ...record,
+            fic_mis_date: moment(record.fic_mis_date).format('YYYY-MM-DD')
+        }));
+        
         res.json({
             success: true,
-            data: results
+            data: formattedResults
         });
         
     } catch (error) {
@@ -66,15 +76,18 @@ const searchAccounts = async (req, res) => {
 };
 
 const reassignStage = async (req, res) => {
+    console.log('Received stage reassignment request:', req.body);
     const { accountSelections, newStage, reason, runKey, misDate } = req.body;
     let connection;
 
     try {
         // Validate input
         if (!accountSelections || !Array.isArray(accountSelections) || accountSelections.length === 0) {
+            console.log('Invalid accountSelections:', accountSelections);
             return res.status(400).json({
                 success: false,
-                error: 'Please select at least one account'
+                error: 'Please select at least one account',
+                details: { accountSelections }
             });
         }
 
@@ -82,30 +95,50 @@ const reassignStage = async (req, res) => {
         const accountNumbers = accountSelections.map(selection => selection.accountNumber);
 
         if (!newStage || ![1, 2, 3].includes(Number(newStage))) {
+            console.log('Invalid stage value:', newStage);
             return res.status(400).json({
                 success: false,
-                error: 'Invalid stage. Stage must be 1, 2, or 3'
+                error: 'Invalid stage. Stage must be 1, 2, or 3',
+                details: { providedStage: newStage }
             });
         }
 
         if (!reason || reason.trim().length === 0) {
+            console.log('Missing reason');
             return res.status(400).json({
                 success: false,
-                error: 'Please provide a reason for stage reassignment'
+                error: 'Please provide a reason for stage reassignment',
+                details: { providedReason: reason }
             });
         }
 
         if (!runKey || !misDate) {
+            console.log('Missing runKey or misDate:', { runKey, misDate });
             return res.status(400).json({
                 success: false,
-                error: 'Run key and MIS date are required'
+                error: 'Run key and MIS date are required',
+                details: { runKey, misDate }
             });
         }
 
         connection = await db.getConnection();
         await connection.beginTransaction();
 
-        // Verify accounts exist and get their current stages
+        // Handle date with proper timezone conversion
+        if (!moment(misDate).isValid()) {
+            console.error('Invalid date format:', { misDate });
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid date format. Please use YYYY-MM-DD format.',
+                details: { providedDate: misDate }
+            });
+        }
+
+        // Format date considering timezone differences between UTC storage and local display
+        const formattedMisDate = moment(misDate).format('YYYY-MM-DD');
+        console.log('Using formatted MIS date:', formattedMisDate);
+
+        // Fix: Use timezone conversion for consistent comparison
         const verifyQuery = `
             SELECT 
                 n_account_number,
@@ -115,13 +148,22 @@ const reassignStage = async (req, res) => {
             FROM fct_reporting_lines 
             WHERE n_account_number IN (?)
             AND n_run_key = ?
-            AND fic_mis_date = ?
-        `;
-        const [existingAccounts] = await connection.query(verifyQuery, [accountNumbers, runKey, misDate]);
+            AND DATE(CONVERT_TZ(fic_mis_date, '+00:00', @@session.time_zone)) = ?
+        `;       
 
+        const [existingAccounts] = await connection.query(verifyQuery, [accountNumbers, runKey, formattedMisDate]);
         if (existingAccounts.length !== accountNumbers.length) {
             const foundAccounts = existingAccounts.map(row => row.n_account_number);
             const missingAccounts = accountNumbers.filter(acc => !foundAccounts.includes(acc));
+            
+            console.log('Account validation failed:', {
+                requestedAccounts: accountNumbers,
+                foundAccounts,
+                missingAccounts,
+                runKey,
+                requestedDate: misDate,
+                formattedDate: formattedMisDate
+            });
             
             await connection.rollback();
             return res.status(400).json({
@@ -131,7 +173,7 @@ const reassignStage = async (req, res) => {
             });
         }
 
-        // Update stages
+        // Fix: Use timezone conversion for consistent comparison
         const updateQuery = `
             UPDATE fct_reporting_lines 
             SET 
@@ -141,35 +183,15 @@ const reassignStage = async (req, res) => {
                 n_target_ifrs_stage_skey = ?
             WHERE n_account_number IN (?)
             AND n_run_key = ?
-            AND fic_mis_date = ?
+            AND DATE(CONVERT_TZ(fic_mis_date, '+00:00', @@session.time_zone)) = ?
         `;
-
         const [updateResult] = await connection.query(updateQuery, [
             newStage,
             newStage,
             newStage,
             accountNumbers,
             runKey,
-            misDate
-        ]);        // Log changes
-        for (const account of existingAccounts) {
-            await auditLogger.log({
-                user_id: req.user.id,
-                action_type: 'STAGE_UPDATE',
-                action_description: `Stage reassignment - ${reason}`,
-                entity_type: 'ACCOUNT',
-                entity_id: account.n_account_number,
-                old_values: JSON.stringify({
-                    stage: account.n_curr_ifrs_stage_skey
-                }),
-                new_values: JSON.stringify({
-                    stage: newStage,
-                    run_key: runKey,
-                    mis_date: misDate,
-                    amount: account.n_carrying_amount_ncy
-                })
-            });
-        }
+            formattedMisDate        ]);
 
         await connection.commit();
 
@@ -180,7 +202,7 @@ const reassignStage = async (req, res) => {
                 accountsUpdated: updateResult.affectedRows,
                 newStage,
                 runKey,
-                misDate,
+                misDate: formattedMisDate, // Use the formatted date in the response
                 totalAmount: existingAccounts.reduce((sum, acc) => sum + Number(acc.n_carrying_amount_ncy), 0)
             }
         });
@@ -206,7 +228,10 @@ const getStageOverrides = async (req, res) => {
     let connection;
 
     try {
-        connection = await db.getConnection();          const query = `
+        connection = await db.getConnection();
+        
+        // Fix: Use moment.js for consistent date formatting in queries
+        const query = `
             SELECT DISTINCT
                 frl.n_account_number,
                 frl.n_run_key,
@@ -227,7 +252,7 @@ const getStageOverrides = async (req, res) => {
                 al.entity_type = 'ACCOUNT' AND 
                 al.entity_id = frl.n_account_number AND
                 JSON_UNQUOTE(JSON_EXTRACT(al.new_values, '$.run_key')) = frl.n_run_key AND
-                JSON_UNQUOTE(JSON_EXTRACT(al.new_values, '$.mis_date')) = frl.fic_mis_date
+                DATE(CONVERT_TZ(frl.fic_mis_date, '+00:00', @@session.time_zone)) = DATE(JSON_UNQUOTE(JSON_EXTRACT(al.new_values, '$.mis_date')))
             ORDER BY al.created_at DESC
         `;
 

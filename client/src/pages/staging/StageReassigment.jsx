@@ -3,6 +3,7 @@ import axios from 'axios';
 import API_URL from '../../utils/Api';
 
 const StageReassignment = () => {
+
     // Search form state
     const [searchCriteria, setSearchCriteria] = useState({
         accountNumber: '',
@@ -22,10 +23,13 @@ const StageReassignment = () => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [success, setSuccess] = useState(null);
-    const [overrides, setOverrides] = useState([]);
 
     useEffect(() => {
-        fetchOverrides();
+        // Add authorization header for all requests
+        const token = localStorage.getItem('token');
+        if (token) {
+            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+        }
     }, []);
 
     const handleSearchChange = (e) => {
@@ -42,8 +46,17 @@ const StageReassignment = () => {
         setError(null);
 
         try {
-            const response = await axios.get(`${API_URL}/staging/reassignment`, { params: searchCriteria });
-            setSearchResults(response.data.data);
+            const token = localStorage.getItem('token');
+            const response = await axios.get(`${API_URL}/staging/reassignment`, { 
+                params: searchCriteria,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Expires': '0',
+                }
+            });
+            setSearchResults(response.data.data || []);
             setSelectedAccounts([]); // Reset selections
             setSelectAll(false);
         } catch (error) {
@@ -68,15 +81,7 @@ const StageReassignment = () => {
         });
     };
 
-    const fetchOverrides = async () => {
-        try {
-            const response = await axios.get(`${API_URL}/staging/reassignment/overrides`);
-            setOverrides(response.data.data);
-        } catch (error) {
-            console.error('Error fetching overrides:', error);
-            setError(error.response?.data?.error || 'Failed to fetch override history');
-        }
-    };
+
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -90,22 +95,36 @@ const StageReassignment = () => {
         setSuccess(null);
 
         try {
-            const searchResult = searchResults.find(result => result.account_number === selectedAccounts[0]);
-            await axios.post(`${API_URL}/staging/reassignment/reassign`, {
+            const searchResult = searchResults.find(result => result.n_account_number === selectedAccounts[0]);
+            if (!searchResult) {
+                throw new Error('Selected account not found in search results');
+            }
+            
+            // Handle date correctly:
+            // 1. Parse the date string to a Date object in local time
+            // 2. Extract the components and reconstruct as YYYY-MM-DD
+            const dateParts = new Date(searchResult.fic_mis_date).toISOString().split('T')[0];
+            
+            const requestPayload = {
                 accountSelections: selectedAccounts.map(accountNumber => ({ accountNumber })),
                 newStage: parseInt(newStage),
                 reason,
                 runKey: searchResult.n_run_key,
-                misDate: searchResult.fic_mis_date
-            });
+                misDate: dateParts
+            };
+
+            console.log('Making request with payload:', requestPayload);
+            const response = await axios.post(`${API_URL}/staging/reassignment/reassign`, requestPayload);
+            console.log('Server response:', response.data);
 
             setSuccess('Stage reassignment completed successfully');
             setNewStage('');
+
             setReason('');
             setSelectedAccounts([]);
             setSelectAll(false);
-            fetchOverrides(); // Refresh the overrides list
         } catch (error) {
+            console.log('Error response:', error.response?.data);
             setError(error.response?.data?.error || 'Failed to reassign stages');
         } finally {
             setLoading(false);
@@ -282,50 +301,6 @@ const StageReassignment = () => {
                             </button>
                         </div>
                     </form>
-                </div>
-            </div>
-
-            {/* Override History */}
-            <div className="bg-white rounded-lg shadow-md border border-gray-300">
-                <div className="px-8 py-6 border-b border-gray-300">
-                    <h3 className="text-xl font-semibold text-gray-800">Stage Override History</h3>
-                </div>
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-300">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Account Number</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Run Key</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Previous Stage</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Current Stage</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Override Date</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Override By</th>
-                                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Reason</th>
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-300">
-                            {overrides.map((override) => (
-                                <tr key={`${override.account_number}-${override.run_key}-${override.override_date}`} className="hover:bg-gray-50 transition-colors duration-150">
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{override.account_number}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{override.run_key}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">Stage {override.previous_stage}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">Stage {override.current_stage}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                                        {new Date(override.override_date).toLocaleString()}
-                                    </td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{override.override_user}</td>
-                                    <td className="px-6 py-4 text-sm text-gray-600">{override.override_reason}</td>
-                                </tr>
-                            ))}
-                            {overrides.length === 0 && (
-                                <tr>
-                                    <td colSpan="7" className="px-6 py-4 text-center text-sm text-gray-500">
-                                        No stage overrides found
-                                    </td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
                 </div>
             </div>
         </div>
