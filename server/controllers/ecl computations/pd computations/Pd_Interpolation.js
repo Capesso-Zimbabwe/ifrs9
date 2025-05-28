@@ -49,6 +49,21 @@ async function pdInterpolationAccountLevel(mis_date) {
       return '0';
     }
 
+    // Log the details fetched for PD interpolation
+    console.log('PD Interpolation Query Results:');
+    console.log('Total rows:', details.length);
+
+    // Log distribution of term structures and buckets
+    const termStructures = new Set();
+    const buckets = new Set();
+    details.forEach(detail => {
+        termStructures.add(detail.v_pd_term_structure_id);
+        buckets.add(detail.v_cash_flow_bucket_id);
+    });
+
+    console.log('Unique Term Structures:', Array.from(termStructures));
+    console.log('Unique Buckets:', Array.from(buckets).sort((a, b) => a - b));
+
     // For each account, run interpolation and update/insert as needed
     for (const detail of details) {
       await processAccountInterpolation(connection, detail, bucket_frequency, pd_model_proj_cap, pd_interpolation_method, cash_flow_bucket_unit);
@@ -105,6 +120,13 @@ async function processAccountInterpolation(connection, detail, bucket_frequency,
     );
     console.log(`Inserted: account=${account_number}, bucket=${bucket.bucket_id}, cum_pd=${bucket.cum_pd}`);
   }
+
+  // Log the interpolation results
+  console.log('PD Interpolation Result:');
+  console.log(`  Term Structure: ${detail.v_pd_term_structure_id}`);
+  console.log(`  Rating: ${detail.v_internal_rating}`);
+  console.log(`  Bucket: ${detail.v_cash_flow_bucket_id}`);
+  console.log(`  Found PD Value: ${detail.n_pd_value}`);
 }
 
 // Poisson interpolation for account-level PD

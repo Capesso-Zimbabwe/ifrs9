@@ -127,7 +127,7 @@ const processInterpolation = async (connection, detail, pdModelProjCap, pdInterp
     structureId: detail.v_pd_term_structure_id,
     frequency: detail.v_pd_term_frequency_unit,
     pdPercent: detail.n_pd_percent
-  });
+  }); 
 
   const bucketLength = detail.v_pd_term_frequency_unit;
   let bucketFrequency, cashFlowBucketUnit;

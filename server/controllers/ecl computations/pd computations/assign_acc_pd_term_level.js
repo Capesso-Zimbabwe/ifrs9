@@ -59,6 +59,19 @@ const processRatingBasedPD = async (ficMisDate, latestRunKey) => {
         connection = await pool.getConnection();
         console.log('Starting PD calculation for Rating-Based Term Structures');
         
+        // Add debug logging for PD lookup data
+        const [pdKeysCheck] = await connection.query(`
+            SELECT DISTINCT 
+                v_pd_term_structure_id,
+                v_cash_flow_bucket_id,
+                COUNT(*) as count
+            FROM fsi_pd_interpolated
+            WHERE v_int_rating_code IS NOT NULL
+            GROUP BY v_pd_term_structure_id, v_cash_flow_bucket_id
+            ORDER BY v_pd_term_structure_id, v_cash_flow_bucket_id;
+        `);
+        console.log('Available PD buckets:', pdKeysCheck);
+        
         // Check PD data availability
         const [pdData] = await connection.query(`
             SELECT COUNT(*) as count, 
@@ -107,6 +120,28 @@ const processRatingBasedPD = async (ficMisDate, latestRunKey) => {
         }
         
         console.log(`Cached ${ratingPdLookupMap.size} rating-based PD lookup values`);
+        
+        // Right after caching rating PD data
+        console.log('Analyzing PD data distribution...');
+        const bucketAnalysis = new Map();
+        for (const row of ratingPdData) {
+            const key = `${row.v_pd_term_structure_id}_${row.v_cash_flow_bucket_id}`;
+            if (!bucketAnalysis.has(key)) {
+                bucketAnalysis.set(key, { count: 0, ratings: new Set() });
+            }
+            const analysis = bucketAnalysis.get(key);
+            analysis.count++;
+            analysis.ratings.add(row.v_int_rating_code);
+        }
+
+        // Log bucket distribution
+        console.log('PD Bucket Analysis:');
+        for (const [key, analysis] of bucketAnalysis) {
+            const [termStructure, bucket] = key.split('_');
+            console.log(`Term Structure ${termStructure}, Bucket ${bucket}:`);
+            console.log(`  Total PD values: ${analysis.count}`);
+            console.log(`  Unique ratings: ${Array.from(analysis.ratings).join(', ')}`);
+        }
         
         // Process in smaller batches with separate connections and transactions
         const batchSize = 250;
@@ -164,8 +199,14 @@ const processRatingBasedPD = async (ficMisDate, latestRunKey) => {
                     const updateValues = [];
                     const updateParams = [];
                     
+                    // Inside the account processing loop, add debugging:
                     for (const account of microAccounts) {
-                        // Calculate bucket size
+                        console.log(`Detailed processing for Account ${account.n_account_number}:`);
+                        console.log(`Term Structure: ${account.n_pd_term_structure_skey}`);
+                        console.log(`Credit Rating: ${account.n_credit_rating_code}`);
+                        console.log(`Maturity Date: ${account.d_maturity_date}`);
+                        console.log(`Term Frequency Unit: ${account.v_pd_term_frequency_unit}`);
+                        
                         let bucketSize = 1;
                         switch (account.v_pd_term_frequency_unit) {
                             case 'M': bucketSize = 1; break;
@@ -174,31 +215,41 @@ const processRatingBasedPD = async (ficMisDate, latestRunKey) => {
                             case 'Y': bucketSize = 12; break;
                         }
                         
-                        // Calculate months to maturity
+                        // Calculate months to maturity with validation
                         const maturityDate = new Date(account.d_maturity_date);
                         const misDate = new Date(ficMisDate);
                         const monthsToMaturity = 
                             (maturityDate.getFullYear() - misDate.getFullYear()) * 12 + 
                             (maturityDate.getMonth() - misDate.getMonth());
                         
-                        // Calculate buckets
+                        // Calculate buckets with detailed logging
                         const twelveMoBucket = Math.min(
-                            Math.max(
-                                Math.ceil(monthsToMaturity / bucketSize),
-                                1
-                            ),
+                            Math.max(Math.ceil(monthsToMaturity / bucketSize), 1),
                             Math.ceil(12.0 / bucketSize)
                         );
                         
                         const lifetimeBucket = Math.ceil(monthsToMaturity / bucketSize);
                         
-                        // Get PD values from cached map
                         const twelveMonthKey = `${account.n_pd_term_structure_skey}_${account.n_credit_rating_code}_${twelveMoBucket}`;
                         const lifetimeKey = `${account.n_pd_term_structure_skey}_${account.n_credit_rating_code}_${lifetimeBucket}`;
                         
-                        const twelveMonthPD = ratingPdLookupMap.get(twelveMonthKey) || 0;
-                        const lifetimePD = ratingPdLookupMap.get(lifetimeKey) || 0;
+                        // Add detailed lookup diagnostics
+                        console.log('PD Calculation Details:');
+                        console.log(`Months to Maturity: ${monthsToMaturity}`);
+                        console.log(`Bucket Size: ${bucketSize}`);
+                        console.log(`12-Month Bucket: ${twelveMoBucket}`);
+                        console.log(`Lifetime Bucket: ${lifetimeBucket}`);
+                        console.log(`12-Month Key: ${twelveMonthKey}`);
+                        console.log(`Lifetime Key: ${lifetimeKey}`);
                         
+                        const twelveMonthPD = ratingPdLookupMap.get(twelveMonthKey);
+                        const lifetimePD = ratingPdLookupMap.get(lifetimeKey);
+                        
+                        console.log(`12-Month PD Found: ${twelveMonthPD !== undefined}`);
+                        console.log(`Lifetime PD Found: ${lifetimePD !== undefined}`);
+                        console.log(`12-Month PD Value: ${twelveMonthPD}`);
+                        console.log(`Lifetime PD Value: ${lifetimePD}`);
+
                         updateValues.push(`(?, ?, ?, ?, ?)`);
                         updateParams.push(
                             account.n_account_number, 
